@@ -1,22 +1,27 @@
 mod game;
 
 use crate::game::{apply_action, new_game, GameAction, GameState};
-
+use rmcp::model::{CallToolResult, Content, ErrorData, ServerCapabilities, ServerInfo};
 use rmcp::{
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
-    model::{ServerCapabilities, ServerInfo},
     schemars,
-    tool, tool_handler, tool_router,
+    tool,
+    tool_handler,
+    tool_router,
     transport::stdio,
-    Json, ServerHandler, ServiceExt,
+    ServerHandler,
+    ServiceExt,
 };
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// The MCP server handler that holds all active games
+// Alias for convenience
+type McpError = ErrorData;
+
+
 /// Parameters for `game_get_state`
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetStateParams {
@@ -36,8 +41,6 @@ pub struct TreasureEngine {
     tool_router: ToolRouter<Self>,
 }
 
-
-
 #[tool_router]
 impl TreasureEngine {
     pub fn new() -> Self {
@@ -49,14 +52,16 @@ impl TreasureEngine {
 
     /// Start a new game and return the initial GameState
     #[tool(description = "Start a new Treasure Quest game and return the initial state")]
-    async fn game_start(&self) -> Result<Json<GameState>, String> {
+    async fn game_start(&self) -> Result<CallToolResult, McpError> {
         let game = new_game();
         let id = game.game_id.clone();
 
         let mut games = self.games.lock().await;
-        games.insert(id.clone(), game.clone());
+        games.insert(id, game.clone());
 
-        Ok(Json(game))
+        let content =
+            Content::json(&game).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![content]))
     }
 
     /// Get the current state for a given game_id
@@ -64,36 +69,49 @@ impl TreasureEngine {
     async fn game_get_state(
         &self,
         params: Parameters<GetStateParams>,
-    ) -> Result<Json<GameState>, String> {
+    ) -> Result<CallToolResult, McpError> {
         let GetStateParams { game_id } = params.0;
 
         let games = self.games.lock().await;
         let state = games
             .get(&game_id)
             .cloned()
-            .ok_or_else(|| format!("No game found for id {}", game_id))?;
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    format!("No game found for id {}", game_id),
+                    None, // data
+                )
+            })?;
 
-        Ok(Json(state))
+        let content =
+            Content::json(&state).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![content]))
     }
-
     /// Apply an action to the game and return the updated state
     #[tool(description = "Apply an action to the game and return updated state")]
     async fn game_apply_action(
         &self,
         params: Parameters<ApplyActionParams>,
-    ) -> Result<Json<GameState>, String> {
+    ) -> Result<CallToolResult, McpError> {
         let ApplyActionParams { game_id, action } = params.0;
 
         let mut games = self.games.lock().await;
         let current = games
             .get(&game_id)
             .cloned()
-            .ok_or_else(|| format!("No game found for id {}", game_id))?;
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    format!("No game found for id {}", game_id),
+                    None, // data
+                )
+            })?;
 
         let updated = apply_action(&current, &action);
         games.insert(game_id, updated.clone());
 
-        Ok(Json(updated))
+        let content =
+            Content::json(&updated).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![content]))
     }
 }
 
@@ -114,7 +132,7 @@ impl ServerHandler for TreasureEngine {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Run the server over stdio (works with your TS test client / gateway)
+    // Run the server over stdio (works with your TS gateway)
     let service = TreasureEngine::new()
         .serve(stdio())
         .await
